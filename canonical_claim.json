@@ -1,0 +1,47 @@
+{
+  "Header": {
+    "ClaimID": "CLM1234567",
+    "SenderID": "PROV_CITY_HOSP",
+    "ReceiverID": "PAYOR_BLUE_CROSS",
+    "Timestamp": "2026-06-30T12:30:00Z"
+  },
+  "Patient": {
+    "MemberID": "2301EC24",
+    "Name": {
+      "First": "John",
+      "Last": "Doe"
+    },
+    "DOB": "1995-08-15",
+    "Gender": "Male"
+  },
+  "Provider": {
+    "BillingNPI": "1987654321",
+    "RenderingNPI": "1234567890",
+    "Taxonomy": "207R00000X"
+  },
+  "Clinical": {
+    "DiagnosisList": [
+      {
+        "Sequence": 1,
+        "Code": "E11.9"
+      }
+    ],
+    "ProcedureList": [
+      {
+        "Sequence": 1,
+        "Code": "99213",
+        "Modifiers": ["25"]
+      }
+    ]
+  },
+  "Financial": {
+    "BilledAmount": 150.00,
+    "Currency": "USD",
+    "PriorAuth": "AUTH9988"
+  },
+  "AIMetadata": {
+    "DenialScore": 0.0,
+    "RiskFlags": [],
+    "AI_Timestamp": ""
+  }
+}
