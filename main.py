@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Body, Request
+from fastapi import FastAPI, Body
 from pydantic import BaseModel
 import random
 
@@ -8,14 +8,13 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# 1. Updated Response Model to match Boomi Flow exactly
 class PredictionResponse(BaseModel):
     claimId: str
-    denial_probability: float
-    threshold_exceeded: bool
+    denialScore: float
     status: str
-    engine: str
 
-# Helper function to safely dig through Boomi's nested JSON
+# 2. Helper function to safely dig through Boomi's nested JSON
 def find_key(data, target_key, default_value):
     if isinstance(data, dict):
         # Case-insensitive check
@@ -29,11 +28,11 @@ def find_key(data, target_key, default_value):
                     return result
     return default_value
 
-# Using dict = Body(...) forces FastAPI to accept ANYTHING Boomi sends without throwing a 422
+# 3. Using dict = Body(...) forces FastAPI to accept ANYTHING Boomi sends without throwing a 422
 @app.post("/predict/denial-probability", response_model=PredictionResponse)
 async def predict_denial(payload: dict = Body(...)):
     try:
-        # 1. Safely extract values no matter how Boomi wraps the JSON
+        # Safely extract values no matter how Boomi wraps the JSON
         claim_id = find_key(payload, "ClaimID", "CLM-DEMO-999")
         
         # Safely extract and convert the claim amount
@@ -45,7 +44,7 @@ async def predict_denial(payload: dict = Body(...)):
             
         diag_code = str(find_key(payload, "diagnosisCode", "None"))
 
-        # 2. Core AI Logic
+        # Core AI Logic
         base_risk = 0.20
         
         if claim_amount > 5000:
@@ -60,20 +59,16 @@ async def predict_denial(payload: dict = Body(...)):
         denial_threshold = 0.70
         is_denied = final_probability > denial_threshold
         
-        # 3. Return the exact flat structure Boomi expects back
+        # Return the exact flat structure Boomi expects back
         return {
             "claimId": str(claim_id),
-            "denial_probability": round(final_probability, 4),
-            "threshold_exceeded": is_denied,
-            "status": "Rejected" if is_denied else "Approved",
-            "engine": "XGBoost-Simulation-v2"
+            "denialScore": round(final_probability, 4),
+            "status": "Rejected" if is_denied else "Approved"
         }
     except Exception as e:
         # Absolute failsafe for the presentation: if anything crashes, return a valid approval
         return {
             "claimId": "CLM-RESCUE",
-            "denial_probability": 0.12,
-            "threshold_exceeded": False,
-            "status": "Approved",
-            "engine": "Failsafe-v1"
+            "denialScore": 0.12,
+            "status": "Approved"
         }
