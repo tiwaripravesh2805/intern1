@@ -1,11 +1,12 @@
 from fastapi import FastAPI, Body
 from pydantic import BaseModel
-import json
+from datetime import datetime
+import re
 
 app = FastAPI(
     title="AI Services Layer - Claims Processing Engine",
-    description="Live microservice evaluating incoming claims for Denial Probability.",
-    version="1.0.0"
+    description="AI microservice evaluating healthcare claims for denial probability.",
+    version="2.0.0"
 )
 
 class PredictionResponse(BaseModel):
@@ -13,7 +14,11 @@ class PredictionResponse(BaseModel):
     denialScore: float
     status: str
 
+
 def find_key(data, target_key, default_value=None):
+    """
+    Recursively search nested dict/list for a key, case-insensitive.
+    """
     if isinstance(data, dict):
         for k, v in data.items():
             if k.lower() == target_key.lower():
@@ -29,72 +34,114 @@ def find_key(data, target_key, default_value=None):
                 return result
     return default_value
 
+
+def safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
+
+def normalize_text(value):
+    return str(value).strip().upper() if value is not None else ""
+
+
+def calculate_age(dob_str: str):
+    """
+    Expects DOB in YYYY-MM-DD format.
+    Returns None if parsing fails.
+    """
+    try:
+        dob = datetime.strptime(dob_str, "%Y-%m-%d").date()
+        today = datetime.today().date()
+        age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+        return age
+    except Exception:
+        return None
+
+
 @app.post("/predict/denial-probability", response_model=PredictionResponse)
 async def predict_denial(payload: dict = Body(...)):
     try:
-        # ---- DEBUG: print the exact Boomi payload in logs ----
-        print("========== PAYLOAD RECEIVED ==========")
-        print(json.dumps(payload, indent=2))
-        print("======================================")
+        # -----------------------------
+        # Extract claim fields from Boomi payload
+        # -----------------------------
+        claim_id = str(find_key(payload, "ClaimID", "CLM-DEMO-999"))
 
-        # Claim ID
-        claim_id = str(
-            find_key(payload, "ClaimID",
-            find_key(payload, "claimId", "CLM-DEMO-999"))
-        )
+        billed_amount = safe_float(find_key(payload, "BilledAmount", 0.0))
 
-        # Amount: try multiple possible names Boomi might send
-        raw_amount = (
-            find_key(payload, "BilledAmount",
-            find_key(payload, "claimAmount",
-            find_key(payload, "amount", 0.0)))
-        )
+        prior_auth = normalize_text(find_key(payload, "PriorAuth", ""))
+        billing_npi = str(find_key(payload, "BillingNPI", "")).strip()
+        rendering_npi = str(find_key(payload, "RenderingNPI", "")).strip()
+        taxonomy = normalize_text(find_key(payload, "Taxonomy", ""))
+        dob = str(find_key(payload, "DOB", "")).strip()
+        gender = normalize_text(find_key(payload, "Gender", ""))
 
-        try:
-            billed_amount = float(raw_amount)
-        except (ValueError, TypeError):
-            billed_amount = 0.0
+        # -----------------------------
+        # Risk scoring logic
+        # -----------------------------
+        score = 0.12   # base denial risk
 
-        # Prior auth / trigger field: try multiple names
-        prior_auth = (
-            find_key(payload, "PriorAuth",
-            find_key(payload, "PriorAuthorization",
-            find_key(payload, "priorAuth",
-            find_key(payload, "priorAuthorization", ""))))
-        )
-        prior_auth = str(prior_auth).strip()
+        # 1) Amount-based risk
+        if billed_amount >= 15000:
+            score += 0.42
+        elif billed_amount >= 10000:
+            score += 0.32
+        elif billed_amount >= 6000:
+            score += 0.22
+        elif billed_amount >= 3000:
+            score += 0.10
 
-        print("DEBUG claim_id =", claim_id)
-        print("DEBUG billed_amount =", billed_amount)
-        print("DEBUG prior_auth =", prior_auth)
-
-        # ===== Hidden trigger codes =====
-        # OAuth 2.0 => force REJECTED
-        if prior_auth.upper() == "OAUTH 2.0":
-            return {
-                "claimId": claim_id,
-                "denialScore": 0.91,
-                "status": "Rejected"
-            }
-
-        # OAuth 1.0 => force APPROVED
-        if prior_auth.upper() == "OAUTH 1.0":
-            return {
-                "claimId": claim_id,
-                "denialScore": 0.18,
-                "status": "Approved"
-            }
-
-        # ===== Default fallback scoring =====
-        if billed_amount > 10000:
-            score = 0.88
-        elif billed_amount > 5000:
-            score = 0.74
-        elif billed_amount > 2500:
-            score = 0.46
+        # 2) Prior authorization quality
+        # good prior auth lowers risk, weak/missing increases it
+        # Examples of "good" values: PA-7788, AUTH-9901, VALID-PA-123
+        if prior_auth == "" or prior_auth in {"NA", "NONE", "N/A"}:
+            score += 0.22
+        elif len(prior_auth) < 5:
+            score += 0.12
+        elif re.match(r"^(PA|AUTH|UM)-[A-Z0-9\-]+$", prior_auth):
+            score -= 0.05
         else:
-            score = 0.18
+            score += 0.05
 
+        # 3) Provider NPI validity checks
+        # simple demo check: NPI should be 10 digits
+        if not (billing_npi.isdigit() and len(billing_npi) == 10):
+            score += 0.18
+        if not (rendering_npi.isdigit() and len(rendering_npi) == 10):
+            score += 0.18
+
+        # 4) Taxonomy risk
+        # Example heuristic:
+        # 207Q... (family practice) = lower risk
+        # 208D... (general practice / certain specialist buckets) = slightly higher
+        # unknown/blank taxonomy = higher
+        if taxonomy.startswith("207Q"):
+            score -= 0.04
+        elif taxonomy.startswith("208D"):
+            score += 0.08
+        elif taxonomy == "":
+            score += 0.12
+        else:
+            score += 0.03
+
+        # 5) Patient age factor
+        age = calculate_age(dob)
+        if age is None:
+            score += 0.08
+        elif age >= 70:
+            score += 0.10
+        elif age <= 1:
+            score += 0.06
+
+        # 6) Tiny gender sanity factor only if missing/invalid
+        if gender not in {"MALE", "FEMALE", "OTHER"}:
+            score += 0.03
+
+        # -----------------------------
+        # Clamp score and derive status
+        # -----------------------------
+        score = max(0.01, min(score, 0.99))
         status = "Rejected" if score >= 0.70 else "Approved"
 
         return {
@@ -103,8 +150,8 @@ async def predict_denial(payload: dict = Body(...)):
             "status": status
         }
 
-    except Exception as e:
-        print("ERROR:", str(e))
+    except Exception:
+        # Failsafe for demo stability
         return {
             "claimId": "CLM-RESCUE",
             "denialScore": 0.12,
